@@ -1,10 +1,14 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { readDbVersion } from './utils/db';
+import { readOperator, writeOperator } from './utils/operator';
+import { useArchiveStore } from './stores/archiveStore';
 
 const route = useRoute();
 const router = useRouter();
+const archiveStore = useArchiveStore();
+const operator = ref(readOperator());
 
 const activeMenu = computed(() => {
   if (route.path.startsWith('/clocks')) return '/clocks';
@@ -23,6 +27,15 @@ function onSelect(index: string) {
   }
   void router.push(index);
 }
+
+function saveOperator(value: string) {
+  operator.value = value.trim();
+  writeOperator(operator.value);
+}
+
+onMounted(() => {
+  void archiveStore.load();
+});
 </script>
 
 <template>
@@ -35,6 +48,13 @@ function onSelect(index: string) {
         <el-menu-item index="/parts">零件清单</el-menu-item>
         <el-menu-item index="/tests">走时测试</el-menu-item>
       </el-menu>
+      <el-input
+        :model-value="operator"
+        class="operator-input"
+        placeholder="操作者姓名"
+        clearable
+        @change="saveOperator"
+      />
       <el-tag size="small" effect="plain">本地结构版本 v{{ version }}</el-tag>
     </el-header>
     <el-main class="app-main">
@@ -65,6 +85,20 @@ function onSelect(index: string) {
   flex: 1;
   border-bottom: none;
   background: transparent;
+}
+.operator-input {
+  width: 150px;
+  margin-right: 10px;
+}
+:deep(.operator-input .el-input__wrapper) {
+  background: #46525f;
+  box-shadow: 0 0 0 1px #5f6b78 inset;
+}
+:deep(.operator-input .el-input__inner) {
+  color: #f4f6f8;
+}
+:deep(.operator-input .el-input__inner::placeholder) {
+  color: #b5bec8;
 }
 :deep(.menu .el-menu-item) {
   color: #d6dde5;

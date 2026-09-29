@@ -4,8 +4,10 @@ import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { useClockStore } from '../stores/clockStore';
 import { useStepStore } from '../stores/stepStore';
+import { useArchiveStore } from '../stores/archiveStore';
 import RateChart from '../components/common/RateChart.vue';
 import StateBadge from '../components/common/StateBadge.vue';
+import { readOperator } from '../utils/operator';
 import { TEST_POSITIONS, judgeTest, type PositionReading } from '../types/test';
 import { amplitudeLevel, avgAmplitude, avgBeatError, avgRate, beatErrorLevel, rateLabel, ratePerDayToMonth } from '../utils/timeCalc';
 
@@ -13,10 +15,14 @@ const route = useRoute();
 const router = useRouter();
 const clockStore = useClockStore();
 const stepStore = useStepStore();
+const archiveStore = useArchiveStore();
 
 const clockId = ref(String(route.params.clockId ?? ''));
 const clock = computed(() => clockStore.byId(clockId.value));
 const tests = computed(() => stepStore.testsByClock(clockId.value));
+const latestSealed = computed(() => archiveStore.latestSealedArchive(clockId.value));
+const activeRepair = computed(() => archiveStore.activeRepairOrder(clockId.value));
+const locked = computed(() => Boolean(latestSealed.value) && !activeRepair.value);
 
 const readings = reactive<PositionReading[]>(
   TEST_POSITIONS.map((position) => ({ position, rate: 0, amplitude: 260, beatError: 0.4 })),
@@ -58,17 +64,29 @@ async function save() {
     ElMessage.error('未指定钟表');
     return;
   }
-  await stepStore.addTest({
-    clockId: clockId.value,
-    testedAt: Date.now(),
-    amplitude: avg.value.amplitude,
-    beatError: avg.value.beatError,
-    rate: avg.value.rate,
-    positions: readings.map((r) => ({ ...r })),
-    powerReserve: powerReserve.value,
-    conclusion: conclusion.value,
-  });
-  ElMessage.success('走时测试已记录');
+  const operator = readOperator();
+  if (!operator) {
+    ElMessage.error('请先在顶部填写操作者');
+    return;
+  }
+  try {
+    await stepStore.addTest(
+      {
+        clockId: clockId.value,
+        testedAt: Date.now(),
+        amplitude: avg.value.amplitude,
+        beatError: avg.value.beatError,
+        rate: avg.value.rate,
+        positions: readings.map((r) => ({ ...r })),
+        powerReserve: powerReserve.value,
+        conclusion: conclusion.value,
+      },
+      operator,
+    );
+    ElMessage.success('走时测试已记录');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '保存失败');
+  }
 }
 
 async function copySheet() {
@@ -103,6 +121,7 @@ function reset() {
 onMounted(async () => {
   await clockStore.load();
   await stepStore.load();
+  await archiveStore.load();
   if (!clock.value && clockStore.items.length > 0) {
     clockId.value = clockStore.items[0].id;
     await router.replace(`/tests/${clockId.value}`);
@@ -116,28 +135,45 @@ onMounted(async () => {
       <h2>走时测试 · {{ clock?.clockNo ?? '未选择' }}</h2>
       <StateBadge :grade="clock?.conditionGrade" />
       <el-tag type="info" effect="plain">历史测试 {{ tests.length }} 次</el-tag>
+      <el-tag v-if="activeRepair" type="warning">返修中 · 测试合格后可合并</el-tag>
+      <el-tag v-else-if="locked" type="danger">正式档案已封存</el-tag>
       <div class="spacer" />
       <el-button @click="router.push(`/clocks/${clockId}`)">返回钟表详情</el-button>
     </div>
 
+    <el-alert
+      v-if="locked"
+      type="error"
+      :closable="false"
+      show-icon
+      title="正式档案已封存，测试记录不可直接新增；请回到详情页开立返修单。"
+    />
+    <el-alert
+      v-else-if="activeRepair"
+      type="warning"
+      :closable="false"
+      show-icon
+      title="返修测试将写入当前工作数据；结论合格且新完成一道工序后，才能在详情页合并下一版。"
+    />
+
     <div class="grid">
       <el-card shadow="never">
         <template #header><strong>多方位读数录入</strong></template>
-        <el-table :data="readings" size="small" border>
+        <el-table :data="readings" size="small" border :class="{ 'is-readonly': locked }">
           <el-table-column prop="position" label="方位" width="90" />
           <el-table-column label="日差 s/d" width="150">
             <template #default="{ row }">
-              <el-input-number v-model="row.rate" :min="-99" :max="99" :step="0.1" :precision="1" size="small" />
+              <el-input-number v-model="row.rate" :min="-99" :max="99" :step="0.1" :precision="1" size="small" :disabled="locked" />
             </template>
           </el-table-column>
           <el-table-column label="摆幅 °" width="160">
             <template #default="{ row }">
-              <el-input-number v-model="row.amplitude" :min="0" :max="400" :step="1" size="small" />
+              <el-input-number v-model="row.amplitude" :min="0" :max="400" :step="1" size="small" :disabled="locked" />
             </template>
           </el-table-column>
           <el-table-column label="偏振 ms" width="160">
             <template #default="{ row }">
-              <el-input-number v-model="row.beatError" :min="0" :max="9.9" :step="0.1" :precision="1" size="small" />
+              <el-input-number v-model="row.beatError" :min="0" :max="9.9" :step="0.1" :precision="1" size="small" :disabled="locked" />
             </template>
           </el-table-column>
           <el-table-column label="分级" min-width="140">
@@ -148,7 +184,7 @@ onMounted(async () => {
           </el-table-column>
         </el-table>
 
-        <el-form label-width="110px" style="margin-top: 14px">
+        <el-form label-width="110px" style="margin-top: 14px" :disabled="locked">
           <el-form-item label="动力储备 h">
             <el-input-number v-model="powerReserve" :min="0" :max="400" />
           </el-form-item>

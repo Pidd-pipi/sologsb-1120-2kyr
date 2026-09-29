@@ -3,7 +3,9 @@ import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import { useClockStore } from '../stores/clockStore';
 import { usePartStore } from '../stores/partStore';
+import { useArchiveStore } from '../stores/archiveStore';
 import StateBadge from '../components/common/StateBadge.vue';
+import { readOperator } from '../utils/operator';
 import {
   PART_DECISIONS,
   PART_NAMES,
@@ -16,6 +18,7 @@ import {
 
 const clockStore = useClockStore();
 const partStore = usePartStore();
+const archiveStore = useArchiveStore();
 
 const wearFilter = ref<WearState | 'all'>('all');
 const clockFilter = ref('all');
@@ -55,6 +58,12 @@ function clockNo(clockId: string): string {
   return clockStore.byId(clockId)?.clockNo ?? '未知钟表';
 }
 
+function lockedFor(clockId: string): boolean {
+  return Boolean(archiveStore.latestSealedArchive(clockId)) && !archiveStore.activeRepairOrder(clockId);
+}
+
+const selectedLocked = computed(() => clockFilter.value !== 'all' && lockedFor(clockFilter.value));
+
 function openDialog() {
   dialogVisible.value = true;
   error.value = '';
@@ -70,25 +79,46 @@ async function submit() {
     error.value = '装配位置必填';
     return;
   }
-  await partStore.add({
-    ...form,
-    position: form.position.trim(),
-    sourceLot: form.decision === '换新' ? form.sourceLot.trim() : form.sourceLot.trim(),
-  });
-  dialogVisible.value = false;
-  ElMessage.success('已登记零件');
-  form.position = '';
-  form.sourceLot = '';
+  const operator = readOperator();
+  if (!operator) {
+    error.value = '请先在顶部填写操作者';
+    return;
+  }
+  if (lockedFor(form.clockId)) {
+    error.value = '正式档案已封存，请先在详情页开立返修单';
+    return;
+  }
+  try {
+    await partStore.add(
+      {
+        ...form,
+        position: form.position.trim(),
+        sourceLot: form.decision === '换新' ? form.sourceLot.trim() : form.sourceLot.trim(),
+      },
+      operator,
+    );
+    dialogVisible.value = false;
+    ElMessage.success('已登记零件');
+    form.position = '';
+    form.sourceLot = '';
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : '保存失败';
+  }
 }
 
 async function setDecision(id: string, decision: PartDecision) {
-  await partStore.update(id, { decision });
-  ElMessage.success(`处理决定已改为「${decision}」`);
+  try {
+    await partStore.update(id, { decision }, readOperator());
+    ElMessage.success(`处理决定已改为「${decision}」`);
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '操作失败');
+  }
 }
 
 onMounted(async () => {
   await clockStore.load();
   await partStore.load();
+  await archiveStore.load();
 });
 </script>
 
@@ -143,13 +173,25 @@ onMounted(async () => {
         </el-table-column>
         <el-table-column label="处理决定" width="200">
           <template #default="{ row }">
-            <el-radio-group :model-value="row.decision" size="small" @change="(v: unknown) => setDecision(row.id, String(v) as PartDecision)">
+            <el-radio-group
+              :model-value="row.decision"
+              size="small"
+              :disabled="lockedFor(row.clockId)"
+              @change="(v: unknown) => setDecision(row.id, String(v) as PartDecision)"
+            >
               <el-radio-button v-for="d in PART_DECISIONS" :key="d" :value="d">{{ d }}</el-radio-button>
             </el-radio-group>
           </template>
         </el-table-column>
         <el-table-column prop="sourceLot" label="配换来源批号" width="150" />
         <el-table-column prop="dimension" label="关键尺寸 mm" width="120" />
+        <el-table-column label="档案状态" width="110">
+          <template #default="{ row }">
+            <el-tag v-if="lockedFor(row.clockId)" type="success" size="small">已封存</el-tag>
+            <el-tag v-else-if="archiveStore.activeRepairOrder(row.clockId)" type="warning" size="small">返修中</el-tag>
+            <el-tag v-else type="info" size="small">可修改</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="待配" width="90">
           <template #default="{ row }">
             <el-tag v-if="row.decision !== '保留' && row.wearState !== '完好'" type="warning" size="small">待修配</el-tag>
@@ -162,7 +204,14 @@ onMounted(async () => {
 
     <el-dialog v-model="dialogVisible" title="登记零件" width="560px">
       <el-alert v-if="error" :title="error" type="error" :closable="false" style="margin-bottom: 10px" />
-      <el-form :model="form" label-width="110px">
+      <el-alert
+        v-if="selectedLocked"
+        title="该钟表正式档案已封存，请先在详情页开立返修单。"
+        type="error"
+        :closable="false"
+        style="margin-bottom: 10px"
+      />
+      <el-form :model="form" label-width="110px" :disabled="selectedLocked">
         <el-form-item label="所属钟表">
           <el-select v-model="form.clockId" style="width: 100%">
             <el-option v-for="c in clockStore.items" :key="c.id" :label="c.clockNo" :value="c.id" />

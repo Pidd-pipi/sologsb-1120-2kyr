@@ -58,12 +58,12 @@ sologsb-1120/
         ├── main.ts
         ├── App.vue
         ├── router/index.ts
-        ├── types/{clock,part,step,test}.ts
-        ├── stores/{clock,part,step}Store.ts
+        ├── types/{clock,part,step,test,archive}.ts
+        ├── stores/{clock,part,step,archive}Store.ts
         ├── components/common/{StepSequence,RateChart,ClockCard,StateBadge}.vue
         ├── hooks/{useClockSearch,useRepairProgress}.ts
         ├── pages/{ClockList,ClockDetail,StepForm,PartList,TestView}.vue
-        └── utils/{db,timeCalc,id}.ts
+        └── utils/{db,timeCalc,id,operator}.ts
 ```
 
 ## 页面与路由
@@ -80,11 +80,14 @@ sologsb-1120/
 
 ## 数据存储说明
 
-- 数据库名 `gbclockrepair`，当前结构版本 **v2**（`localStorage['gbclockrepair:db-version']` 记录）。
-- 四张表：`clocks`（钟表）、`parts`（机芯零件）、`steps`（维修工序）、`tests`（走时测试）。
-- v1 → v2 迁移：补齐老记录的 `state`、`partIds`、`torque`、`positions` 字段并新增索引。
+- 数据库名 `gbclockrepair`，当前结构版本 **v3**（`localStorage['gbclockrepair:db-version']` 记录）。
+- 七张表：`clocks`（钟表）、`parts`（机芯零件）、`steps`（维修工序）、`tests`（走时测试）、`archives`（正式档案版本快照）、`repairOrders`（返修单）、`historyEvents`（只增不改的维修沿革）。
+- v2 → v3 迁移：新增档案、返修单、沿革索引；旧数据首次打开自动补成第 1 版；若当时工序已全完成且有合格测试，则直接封存，否则保留为待封存版本。
+- 工序全部完成且存在合格测试后，第 1 版正式封存。封存后的业务表修改必须先开立返修单。
+- 返修期间详情默认仍展示原正式档案；返修中新完成一道工序，并在返修单开立后补一次合格测试，才能合并生成下一版。
+- `historyEvents` 仅允许新增，应用层对更新、删除操作直接抛错；每条事件记录操作者、时间、动作、关联记录、前后值与返修单 ID。
 - 容器无状态、不挂载命名卷；清空站点数据即回到初始示范数据。
-- 首次打开灌入 2 台示范钟表、3 项零件、3 道工序与 1 次走时测试。
+- 首次打开灌入 2 台示范钟表、3 项零件、3 道已完成工序与 1 次合格走时测试，并生成已封存的第 1 版档案。
 
 ## 功能要点
 
@@ -93,3 +96,5 @@ sologsb-1120/
 - **工序完成 / 回退**：完成后写 `finishedAt`，回退后计入待办与回退计数。
 - **双轴走时图**：`<RateChart>` 左轴日差 s/d、右轴摆幅 °，标注四方位读数与均值。
 - **走时单导出**：按方位均值生成文本，可复制或下载 txt。
+- **维修沿革**：工序、零件、测试、档案与返修单动作均只增记录，详情页可按类型筛选并查看前后值。
+- **正式档案 / 返修合并**：封存后默认只读展示正式快照；后续修改先开返修单，满足“新完成一道工序 + 补一次合格测试”后才合并下一版。

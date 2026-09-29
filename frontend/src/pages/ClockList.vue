@@ -6,11 +6,14 @@ import { useClockStore } from '../stores/clockStore';
 import { useStepStore } from '../stores/stepStore';
 import { useClockSearch } from '../hooks/useClockSearch';
 import ClockCard from '../components/common/ClockCard.vue';
+import { readOperator } from '../utils/operator';
+import { useArchiveStore } from '../stores/archiveStore';
 import { CLOCK_KINDS, CONDITION_GRADES, type ClockDraft, type ClockKind, type ConditionGrade } from '../types/clock';
 
 const router = useRouter();
 const clockStore = useClockStore();
 const stepStore = useStepStore();
+const archiveStore = useArchiveStore();
 const { filters, result, options, reset } = useClockSearch();
 
 const REPAIR_STATES = ['未开工', '维修中', '待测试', '已完成'] as const;
@@ -67,7 +70,12 @@ async function submit() {
     formError.value = '藏品号已存在，请更换';
     return;
   }
-  const created = await clockStore.add({ ...form, clockNo: form.clockNo.trim() });
+  const operator = readOperator();
+  if (!operator) {
+    formError.value = '请先在顶部填写操作者';
+    return;
+  }
+  const created = await clockStore.add({ ...form, clockNo: form.clockNo.trim() }, operator);
   dialogVisible.value = false;
   ElMessage.success(`已建档「${created.clockNo}」`);
   form.clockNo = '';
@@ -79,6 +87,7 @@ async function submit() {
 onMounted(() => {
   void clockStore.load();
   void stepStore.load();
+  void archiveStore.load();
 });
 </script>
 

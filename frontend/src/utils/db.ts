@@ -1,12 +1,13 @@
-import Dexie, { type Table } from 'dexie';
+import Dexie, { type Table, type Transaction } from 'dexie';
 import type { Clock } from '../types/clock';
 import type { MovementPart } from '../types/part';
 import type { RepairStep } from '../types/step';
 import type { TimekeepingTest } from '../types/test';
+import type { ClockArchive, HistoryEvent, RepairOrder } from '../types/archive';
 import { newId } from './id';
 
 export const DB_NAME = 'gbclockrepair';
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const LS_VERSION_KEY = 'gbclockrepair:db-version';
 
 class ClockRepairDB extends Dexie {
@@ -14,6 +15,9 @@ class ClockRepairDB extends Dexie {
   parts!: Table<MovementPart, string>;
   steps!: Table<RepairStep, string>;
   tests!: Table<TimekeepingTest, string>;
+  archives!: Table<ClockArchive, string>;
+  repairOrders!: Table<RepairOrder, string>;
+  historyEvents!: Table<HistoryEvent, string>;
 
   constructor() {
     super(DB_NAME);
@@ -48,10 +52,35 @@ class ClockRepairDB extends Dexie {
             if (row.positions === undefined) row.positions = [];
           });
       });
+    // v3：新增正式档案版本、返修单与只增不改的维修沿革
+    this.version(3)
+      .stores({
+        clocks: 'id, clockNo, kind, caliber, conditionGrade, createdAt',
+        parts: 'id, clockId, name, wearState, decision, sourceLot',
+        steps: 'id, clockId, seq, stepType, state, startedAt',
+        tests: 'id, clockId, testedAt, conclusion',
+        archives: 'id, clockId, version, status, sealedAt',
+        repairOrders: 'id, clockId, status, createdAt',
+        historyEvents: 'id, clockId, at, entityType, action, repairOrderId',
+      })
+      .upgrade(async (tx) => {
+        const clockIds = await tx.table('clocks').toCollection().primaryKeys();
+        for (const clockId of clockIds) {
+          await ensureClockBaseline(clockId as string, tx);
+        }
+      });
   }
 }
 
 export const db = new ClockRepairDB();
+
+// 维修沿革只增不改：应用层任何 update/delete 操作都直接拒绝。
+db.historyEvents.hook('updating', () => {
+  throw new Error('维修沿革只增不改，禁止更新历史事件');
+});
+db.historyEvents.hook('deleting', () => {
+  throw new Error('维修沿革只增不改，禁止删除历史事件');
+});
 
 /**
  * 把 Vue 响应式代理（reactive/ref 内部对象，含嵌套数组）转成可结构化克隆的普通对象。
@@ -77,6 +106,110 @@ export function readDbVersion(): number {
     return DB_VERSION;
   }
 }
+
+function isQualifyingTest(test: TimekeepingTest): boolean {
+  return test.conclusion?.includes('合格') === true && !test.conclusion.includes('不合格');
+}
+
+function isArchiveReady(steps: RepairStep[], tests: TimekeepingTest[]): boolean {
+  return steps.length > 0 && steps.every((step) => step.state === 'done') && tests.some(isQualifyingTest);
+}
+
+async function loadSnapshot(clockId: string): Promise<{
+  clock?: Clock;
+  parts: MovementPart[];
+  steps: RepairStep[];
+  tests: TimekeepingTest[];
+}> {
+  const [clock, parts, steps, tests] = await Promise.all([
+    db.clocks.get(clockId),
+    db.parts.where('clockId').equals(clockId).toArray(),
+    db.steps.where('clockId').equals(clockId).toArray(),
+    db.tests.where('clockId').equals(clockId).toArray(),
+  ]);
+  steps.sort((a, b) => a.seq - b.seq || a.startedAt - b.startedAt);
+  tests.sort((a, b) => b.testedAt - a.testedAt);
+  return { clock, parts, steps, tests };
+}
+
+/**
+ * 为没有任何版本的旧数据补第 1 版。
+ * 若旧数据已满足“工序全完成 + 已有合格测试”，同步封存；否则保留 draft，待当前工作补齐后封存。
+ */
+export async function ensureClockBaseline(clockId: string, tx: Transaction): Promise<void> {
+  const run = async (scope: Transaction) => {
+    const archivesTable = scope.table<ClockArchive, string>('archives');
+    const historyTable = scope.table<HistoryEvent, string>('historyEvents');
+    const existing = await archivesTable.where('clockId').equals(clockId).first();
+    if (existing) return;
+
+    const clock = await scope.table<Clock, string>('clocks').get(clockId);
+    if (!clock) return;
+    const parts = await scope.table<MovementPart, string>('parts').where('clockId').equals(clockId).toArray();
+    const steps = await scope.table<RepairStep, string>('steps').where('clockId').equals(clockId).toArray();
+    const tests = await scope.table<TimekeepingTest, string>('tests').where('clockId').equals(clockId).toArray();
+    steps.sort((a, b) => a.seq - b.seq || a.startedAt - b.startedAt);
+    tests.sort((a, b) => b.testedAt - a.testedAt);
+
+    const now = Date.now();
+    const ready = isArchiveReady(steps, tests);
+    const archiveId = newId('arc');
+    const archive: ClockArchive = {
+      id: archiveId,
+      clockId,
+      version: 1,
+      status: ready ? 'sealed' : 'draft',
+      source: 'baseline',
+      snapshot: { clock, parts, steps, tests },
+      createdAt: now,
+      sealedAt: ready ? now : undefined,
+    };
+    const event: HistoryEvent = {
+      id: newId('hst'),
+      clockId,
+      at: now,
+      actor: '系统（旧数据首次打开补版）',
+      action: 'baseline',
+      entityType: 'archive',
+      entityId: archiveId,
+      relatedIds: [clockId, ...parts.map((p) => p.id), ...steps.map((s) => s.id), ...tests.map((t) => t.id)],
+      before: null,
+      after: archive,
+      note: ready ? '旧数据首次打开补为第 1 版，且满足封存条件' : '旧数据首次打开补为第 1 版，待工序与测试齐全后封存',
+    };
+    await archivesTable.add(archive);
+    await historyTable.add(event);
+
+    if (ready) {
+      await historyTable.add({
+        id: newId('hst'),
+        clockId,
+        at: now,
+        actor: '系统（旧数据首次打开补版）',
+        action: 'archive',
+        entityType: 'archive',
+        entityId: archiveId,
+        relatedIds: [clockId],
+        before: { ...archive, status: 'draft', sealedAt: undefined },
+        after: archive,
+        note: '第 1 版正式封存',
+      });
+    }
+  };
+
+  await run(tx);
+}
+
+export async function ensureAllClockBaselines(): Promise<void> {
+  await db.transaction('rw', [db.archives, db.historyEvents, db.clocks, db.parts, db.steps, db.tests], async (tx) => {
+    const clocks = await tx.table('clocks').toCollection().primaryKeys();
+    for (const clockId of clocks) {
+      await ensureClockBaseline(clockId as string, tx);
+    }
+  });
+}
+
+export { isArchiveReady, isQualifyingTest, loadSnapshot };
 
 /** 首次进入灌入示范数据，保证页面非空壳 */
 export async function ensureSeedData(): Promise<void> {
@@ -208,7 +341,8 @@ export async function ensureSeedData(): Promise<void> {
       troubleNote: '',
       operator: '祁仲言',
       startedAt: now - 3 * day,
-      state: 'pending',
+      finishedAt: now - 2 * day + 2 * 3600000,
+      state: 'done',
     },
   ];
 
@@ -237,4 +371,5 @@ export async function ensureSeedData(): Promise<void> {
     await db.steps.bulkPut(steps);
     await db.tests.bulkPut(tests);
   });
+  await ensureAllClockBaselines();
 }

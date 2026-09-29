@@ -8,6 +8,8 @@ const props = defineProps<{
   items: RepairStep[];
   /** 是否展示上下移动/拖拽排序 */
   sortable?: boolean;
+  /** 是否允许完成/回退等操作 */
+  interactive?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -18,6 +20,7 @@ const emit = defineEmits<{
 }>();
 
 const dragId = ref<string>('');
+const canInteract = computed(() => props.interactive !== false);
 
 const gaps = computed(() => findSeqGaps(props.items.map((it) => it.seq)));
 const conflict = computed(() => gaps.value.length > 0);
@@ -73,31 +76,35 @@ function onDrop(toId: string) {
       </el-table-column>
       <el-table-column label="操作" width="250">
         <template #default="{ row, $index }">
-          <el-button v-if="row.state !== 'done'" size="small" type="primary" @click="emit('finish', row.id)">
-            完成
-          </el-button>
-          <el-button v-else size="small" type="warning" @click="emit('rollback', row.id)">回退</el-button>
-          <template v-if="sortable">
-            <el-button size="small" :disabled="$index === 0" @click="emit('move', { id: row.id, direction: 'up' })">
-              上移
+          <template v-if="canInteract">
+            <el-button v-if="row.state !== 'done'" size="small" type="primary" @click="emit('finish', row.id)">
+              完成
             </el-button>
-            <el-button
-              size="small"
-              :disabled="$index === items.length - 1"
-              @click="emit('move', { id: row.id, direction: 'down' })"
+            <el-button v-else size="small" type="warning" @click="emit('rollback', row.id)">回退</el-button>
+            <template v-if="sortable">
+              <el-button size="small" :disabled="$index === 0" @click="emit('move', { id: row.id, direction: 'up' })">
+                上移
+              </el-button>
+              <el-button
+                size="small"
+                :disabled="$index === items.length - 1"
+                @click="emit('move', { id: row.id, direction: 'down' })"
+              >
+                下移
+              </el-button>
+            </template>
+            <span
+              v-if="sortable"
+              class="drag-handle"
+              draggable="true"
+              title="拖拽到目标行可交换顺序"
+              @dragstart="onDragStart(row.id)"
+              @dragover.prevent
+              @drop="onDrop(row.id)"
+              >⣿</span
             >
-              下移
-            </el-button>
           </template>
-          <span
-            class="drag-handle"
-            draggable="true"
-            title="拖拽到目标行可交换顺序"
-            @dragstart="onDragStart(row.id)"
-            @dragover.prevent
-            @drop="onDrop(row.id)"
-            >⣿</span
-          >
+          <span v-else class="muted">正式快照不可改</span>
         </template>
       </el-table-column>
     </el-table>
@@ -109,6 +116,10 @@ function onDrop(toId: string) {
 .gap {
   color: #d93025;
   font-weight: 700;
+}
+.muted {
+  color: #7b8592;
+  font-size: 12px;
 }
 .drag-handle {
   margin-left: 8px;
