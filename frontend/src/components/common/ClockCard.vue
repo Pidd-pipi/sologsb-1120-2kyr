@@ -6,6 +6,9 @@ defineProps<{
   item: Clock;
   /** 底部附加说明（工序进度等） */
   footer?: string;
+  /** 档案角标，如「正式档案 v1」「返修中」 */
+  archiveTag?: string;
+  archiveTagType?: 'success' | 'danger' | 'warning' | 'info';
 }>();
 
 const emit = defineEmits<{
@@ -19,6 +22,7 @@ const emit = defineEmits<{
       <strong>{{ item.clockNo }}</strong>
       <StateBadge :grade="item.conditionGrade" />
       <el-tag size="small" effect="plain">{{ item.kind }}</el-tag>
+      <el-tag v-if="archiveTag" size="small" :type="archiveTagType ?? 'success'" effect="dark">{{ archiveTag }}</el-tag>
     </div>
     <div class="line">机芯型号：{{ item.caliber }}</div>
     <div class="line">{{ item.origin }} · {{ item.maker }} · {{ item.yearMade }}</div>

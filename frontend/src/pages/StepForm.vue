@@ -5,8 +5,10 @@ import { ElMessage } from 'element-plus';
 import { useClockStore } from '../stores/clockStore';
 import { usePartStore } from '../stores/partStore';
 import { useStepStore } from '../stores/stepStore';
+import { useArchiveStore } from '../stores/archiveStore';
 import { useRepairProgress } from '../hooks/useRepairProgress';
 import StepSequence from '../components/common/StepSequence.vue';
+import { ArchiveLockedError } from '../utils/archive';
 import { STEP_FIELD_MAP, STEP_TYPES, type RepairStepDraft, type StepType } from '../types/step';
 
 const route = useRoute();
@@ -14,11 +16,18 @@ const router = useRouter();
 const clockStore = useClockStore();
 const partStore = usePartStore();
 const stepStore = useStepStore();
+const archiveStore = useArchiveStore();
 
 const clockId = ref(String(route.query.clockId ?? ''));
 const { steps, total, percent, current, gaps } = useRepairProgress(clockId);
 const parts = computed(() => partStore.byClock(clockId.value));
 const nextSeq = computed(() => (steps.value.length === 0 ? 1 : Math.max(...steps.value.map((s) => s.seq)) + 1));
+/** 该钟表是否已封存且未开返修单：封存后工序录入页只读 */
+const locked = computed(() => {
+  if (!clockId.value) return false;
+  return !!archiveStore.sealedByClock(clockId.value) && !archiveStore.repairByClock(clockId.value);
+});
+const activeRepair = computed(() => (clockId.value ? archiveStore.repairByClock(clockId.value) : undefined));
 
 const form = reactive<RepairStepDraft>({
   clockId: '',
@@ -75,26 +84,39 @@ async function submit() {
     error.value = `顺序号跳号：当前最大顺序号为 ${Math.max(0, nextSeq.value - 1)}，新步骤必须用 ${nextSeq.value}`;
     return;
   }
-  const created = await stepStore.add({ ...form, clockId: clockId.value, startedAt: Date.now() });
-  ElMessage.success(`已追加步骤 #${created.seq} ${created.stepType}`);
-  form.operator = '';
-  form.troubleNote = '';
-  form.partIds = [];
+  try {
+    const created = await stepStore.add({ ...form, clockId: clockId.value, startedAt: Date.now() });
+    ElMessage.success(`已追加步骤 #${created.seq} ${created.stepType}`);
+    form.operator = '';
+    form.troubleNote = '';
+    form.partIds = [];
+  } catch (err) {
+    error.value = err instanceof ArchiveLockedError ? err.message : '保存失败';
+  }
 }
 
 async function finish(id: string) {
-  await stepStore.finish(id);
-  ElMessage.success('步骤已完成');
+  try {
+    await stepStore.finish(id);
+    ElMessage.success('步骤已完成');
+  } catch (err) {
+    ElMessage.error(err instanceof ArchiveLockedError ? err.message : '操作失败');
+  }
 }
 async function rollback(id: string) {
-  await stepStore.rollback(id);
-  ElMessage.warning('步骤已回退');
+  try {
+    await stepStore.rollback(id);
+    ElMessage.warning('步骤已回退');
+  } catch (err) {
+    ElMessage.error(err instanceof ArchiveLockedError ? err.message : '操作失败');
+  }
 }
 
 onMounted(async () => {
   await clockStore.load();
   await partStore.load();
   await stepStore.load();
+  await archiveStore.load();
   if (!clockId.value && clockStore.items.length > 0) {
     clockId.value = clockStore.items[0].id;
   }
@@ -111,6 +133,24 @@ onMounted(async () => {
       <div class="spacer" />
       <el-button v-if="clockId" @click="router.push(`/clocks/${clockId}`)">查看钟表详情</el-button>
     </div>
+
+    <el-alert
+      v-if="locked"
+      type="error"
+      :closable="false"
+      show-icon
+      title="该钟表已封存为正式档案，工序不可修改"
+      description="请先到钟表详情页开立返修单，返修期内才能追加、完成或调整工序。"
+      style="margin-bottom: 4px"
+    />
+    <el-alert
+      v-else-if="activeRepair"
+      type="warning"
+      :closable="false"
+      show-icon
+      :title="`返修单 ${activeRepair.no} 进行中，本次修改计入返修沿革`"
+      style="margin-bottom: 4px"
+    />
 
     <div class="grid">
       <el-card shadow="never">
@@ -173,7 +213,7 @@ onMounted(async () => {
             <el-input v-model="form.operator" />
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" @click="submit">保存步骤</el-button>
+            <el-button type="primary" :disabled="locked" @click="submit">保存步骤</el-button>
             <el-button @click="router.push('/clocks')">返回台账</el-button>
           </el-form-item>
         </el-form>
@@ -188,7 +228,7 @@ onMounted(async () => {
             <span v-else class="muted">全部完成</span>
           </div>
         </template>
-        <StepSequence :items="steps" @finish="finish" @rollback="rollback" />
+        <StepSequence :items="steps" :readonly="locked" @finish="finish" @rollback="rollback" />
       </el-card>
     </div>
   </div>

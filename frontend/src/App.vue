@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { readDbVersion } from './utils/db';
+import { getOperator, setOperator } from './utils/operator';
+import { db } from './utils/db';
 
 const route = useRoute();
 const router = useRouter();
@@ -15,6 +17,22 @@ const activeMenu = computed(() => {
 });
 
 const version = readDbVersion();
+const operator = ref(getOperator());
+const operatorOptions = ref<string[]>([]);
+
+onMounted(async () => {
+  try {
+    const entries = await db.history.toArray();
+    operatorOptions.value = Array.from(new Set(entries.map((e) => e.operator).filter(Boolean)));
+  } catch {
+    /* 沿革表不可用时忽略 */
+  }
+});
+
+function onOperator(value: string) {
+  setOperator(value);
+  operator.value = getOperator();
+}
 
 function onSelect(index: string) {
   if (index === '/tests') {
@@ -35,6 +53,21 @@ function onSelect(index: string) {
         <el-menu-item index="/parts">零件清单</el-menu-item>
         <el-menu-item index="/tests">走时测试</el-menu-item>
       </el-menu>
+      <div class="operator" title="当前操作者：维修沿革以此人记录">
+        <span class="operator-label">操作者</span>
+        <el-select
+          :model-value="operator"
+          size="small"
+          filterable
+          allow-create
+          default-first-option
+          placeholder="选择或输入操作者"
+          style="width: 150px"
+          @change="onOperator"
+        >
+          <el-option v-for="n in operatorOptions" :key="n" :label="n" :value="n" />
+        </el-select>
+      </div>
       <el-tag size="small" effect="plain">本地结构版本 v{{ version }}</el-tag>
     </el-header>
     <el-main class="app-main">
@@ -72,6 +105,16 @@ function onSelect(index: string) {
 :deep(.menu .el-menu-item.is-active) {
   color: #ffffff;
   border-bottom-color: #e7c56b;
+}
+.operator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.operator-label {
+  font-size: 13px;
+  color: #c4ccd5;
+  white-space: nowrap;
 }
 .app-main {
   padding: 18px 22px 40px;

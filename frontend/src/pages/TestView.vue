@@ -4,8 +4,10 @@ import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { useClockStore } from '../stores/clockStore';
 import { useStepStore } from '../stores/stepStore';
+import { useArchiveStore } from '../stores/archiveStore';
 import RateChart from '../components/common/RateChart.vue';
 import StateBadge from '../components/common/StateBadge.vue';
+import { ArchiveLockedError, isPassingTest } from '../utils/archive';
 import { TEST_POSITIONS, judgeTest, type PositionReading } from '../types/test';
 import { amplitudeLevel, avgAmplitude, avgBeatError, avgRate, beatErrorLevel, rateLabel, ratePerDayToMonth } from '../utils/timeCalc';
 
@@ -13,10 +15,16 @@ const route = useRoute();
 const router = useRouter();
 const clockStore = useClockStore();
 const stepStore = useStepStore();
+const archiveStore = useArchiveStore();
 
 const clockId = ref(String(route.params.clockId ?? ''));
 const clock = computed(() => clockStore.byId(clockId.value));
 const tests = computed(() => stepStore.testsByClock(clockId.value));
+const locked = computed(() => {
+  if (!clockId.value) return false;
+  return !!archiveStore.sealedByClock(clockId.value) && !archiveStore.repairByClock(clockId.value);
+});
+const activeRepair = computed(() => (clockId.value ? archiveStore.repairByClock(clockId.value) : undefined));
 
 const readings = reactive<PositionReading[]>(
   TEST_POSITIONS.map((position) => ({ position, rate: 0, amplitude: 260, beatError: 0.4 })),
@@ -58,17 +66,26 @@ async function save() {
     ElMessage.error('未指定钟表');
     return;
   }
-  await stepStore.addTest({
-    clockId: clockId.value,
-    testedAt: Date.now(),
-    amplitude: avg.value.amplitude,
-    beatError: avg.value.beatError,
-    rate: avg.value.rate,
-    positions: readings.map((r) => ({ ...r })),
-    powerReserve: powerReserve.value,
-    conclusion: conclusion.value,
-  });
-  ElMessage.success('走时测试已记录');
+  try {
+    const record = await stepStore.addTest({
+      clockId: clockId.value,
+      testedAt: Date.now(),
+      amplitude: avg.value.amplitude,
+      beatError: avg.value.beatError,
+      rate: avg.value.rate,
+      positions: readings.map((r) => ({ ...r })),
+      powerReserve: powerReserve.value,
+      conclusion: conclusion.value,
+    });
+    if (activeRepair.value && isPassingTest(record)) {
+      ElMessage.success('合格测试已记录，计入返修单合并依据');
+    } else {
+      ElMessage.success('走时测试已记录');
+    }
+    return record;
+  } catch (err) {
+    ElMessage.error(err instanceof ArchiveLockedError ? err.message : '保存失败');
+  }
 }
 
 async function copySheet() {
@@ -103,6 +120,7 @@ function reset() {
 onMounted(async () => {
   await clockStore.load();
   await stepStore.load();
+  await archiveStore.load();
   if (!clock.value && clockStore.items.length > 0) {
     clockId.value = clockStore.items[0].id;
     await router.replace(`/tests/${clockId.value}`);
@@ -119,6 +137,22 @@ onMounted(async () => {
       <div class="spacer" />
       <el-button @click="router.push(`/clocks/${clockId}`)">返回钟表详情</el-button>
     </div>
+
+    <el-alert
+      v-if="locked"
+      type="error"
+      :closable="false"
+      show-icon
+      title="该钟表已封存为正式档案，测试不可录入"
+      description="请先到钟表详情页开立返修单；返修期内补一次合格测试（且新完成一道工序）后才可合并下一版。"
+    />
+    <el-alert
+      v-else-if="activeRepair"
+      type="warning"
+      :closable="false"
+      show-icon
+      :title="`返修单 ${activeRepair.no} 进行中：合格测试将计入合并依据（已补 ${activeRepair.passingTestIds.length} 次）`"
+    />
 
     <div class="grid">
       <el-card shadow="never">
@@ -156,8 +190,8 @@ onMounted(async () => {
             <el-input v-model="customConclusion" placeholder="留空则按均值自动判定" />
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" @click="save">保存测试记录</el-button>
-            <el-button @click="reset">重置读数</el-button>
+            <el-button type="primary" :disabled="locked" @click="save">保存测试记录</el-button>
+            <el-button :disabled="locked" @click="reset">重置读数</el-button>
           </el-form-item>
         </el-form>
       </el-card>

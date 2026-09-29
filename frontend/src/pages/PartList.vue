@@ -3,7 +3,9 @@ import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import { useClockStore } from '../stores/clockStore';
 import { usePartStore } from '../stores/partStore';
+import { useArchiveStore } from '../stores/archiveStore';
 import StateBadge from '../components/common/StateBadge.vue';
+import { ArchiveLockedError } from '../utils/archive';
 import {
   PART_DECISIONS,
   PART_NAMES,
@@ -16,6 +18,7 @@ import {
 
 const clockStore = useClockStore();
 const partStore = usePartStore();
+const archiveStore = useArchiveStore();
 
 const wearFilter = ref<WearState | 'all'>('all');
 const clockFilter = ref('all');
@@ -55,6 +58,16 @@ function clockNo(clockId: string): string {
   return clockStore.byId(clockId)?.clockNo ?? '未知钟表';
 }
 
+/** 某钟表是否处于封存只读（无进行中返修单） */
+function lockedOf(clockId: string): boolean {
+  return !!archiveStore.sealedByClock(clockId) && !archiveStore.repairByClock(clockId);
+}
+
+/** 当前登记弹窗所选钟表是否锁定 */
+const dialogLocked = computed(() => (form.clockId ? lockedOf(form.clockId) : false));
+/** 列表是否存在任何已锁定钟表（用于顶部提示） */
+const anyLocked = computed(() => clockStore.items.some((c) => lockedOf(c.id)));
+
 function openDialog() {
   dialogVisible.value = true;
   error.value = '';
@@ -70,25 +83,34 @@ async function submit() {
     error.value = '装配位置必填';
     return;
   }
-  await partStore.add({
-    ...form,
-    position: form.position.trim(),
-    sourceLot: form.decision === '换新' ? form.sourceLot.trim() : form.sourceLot.trim(),
-  });
-  dialogVisible.value = false;
-  ElMessage.success('已登记零件');
-  form.position = '';
-  form.sourceLot = '';
+  try {
+    await partStore.add({
+      ...form,
+      position: form.position.trim(),
+      sourceLot: form.decision === '换新' ? form.sourceLot.trim() : form.sourceLot.trim(),
+    });
+    dialogVisible.value = false;
+    ElMessage.success('已登记零件');
+    form.position = '';
+    form.sourceLot = '';
+  } catch (err) {
+    error.value = err instanceof ArchiveLockedError ? err.message : '登记失败';
+  }
 }
 
 async function setDecision(id: string, decision: PartDecision) {
-  await partStore.update(id, { decision });
-  ElMessage.success(`处理决定已改为「${decision}」`);
+  try {
+    await partStore.update(id, { decision });
+    ElMessage.success(`处理决定已改为「${decision}」`);
+  } catch (err) {
+    ElMessage.error(err instanceof ArchiveLockedError ? err.message : '修改失败');
+  }
 }
 
 onMounted(async () => {
   await clockStore.load();
   await partStore.load();
+  await archiveStore.load();
 });
 </script>
 
@@ -101,6 +123,14 @@ onMounted(async () => {
       <div class="spacer" />
       <el-button type="primary" @click="openDialog">登记零件</el-button>
     </div>
+
+    <el-alert
+      v-if="anyLocked"
+      type="warning"
+      :closable="false"
+      show-icon
+      title="部分钟表已封存正式档案：其零件处理决定不可直接修改，须先开返修单；新登记零件时请选择未封存或返修中的钟表。"
+    />
 
     <el-card shadow="never">
       <el-form :inline="true" @submit.prevent>
@@ -143,7 +173,12 @@ onMounted(async () => {
         </el-table-column>
         <el-table-column label="处理决定" width="200">
           <template #default="{ row }">
-            <el-radio-group :model-value="row.decision" size="small" @change="(v: unknown) => setDecision(row.id, String(v) as PartDecision)">
+            <el-tooltip v-if="lockedOf(row.clockId)" content="档案已封存，改处理决定请先开返修单" placement="top">
+              <el-radio-group :model-value="row.decision" size="small" disabled>
+                <el-radio-button v-for="d in PART_DECISIONS" :key="d" :value="d">{{ d }}</el-radio-button>
+              </el-radio-group>
+            </el-tooltip>
+            <el-radio-group v-else :model-value="row.decision" size="small" @change="(v: unknown) => setDecision(row.id, String(v) as PartDecision)">
               <el-radio-button v-for="d in PART_DECISIONS" :key="d" :value="d">{{ d }}</el-radio-button>
             </el-radio-group>
           </template>
@@ -161,6 +196,14 @@ onMounted(async () => {
     </el-card>
 
     <el-dialog v-model="dialogVisible" title="登记零件" width="560px">
+      <el-alert
+        v-if="dialogLocked"
+        type="error"
+        :closable="false"
+        show-icon
+        title="该钟表已封存为正式档案，请先到详情页开返修单后再登记零件"
+        style="margin-bottom: 10px"
+      />
       <el-alert v-if="error" :title="error" type="error" :closable="false" style="margin-bottom: 10px" />
       <el-form :model="form" label-width="110px">
         <el-form-item label="所属钟表">

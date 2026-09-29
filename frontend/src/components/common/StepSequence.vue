@@ -8,6 +8,8 @@ const props = defineProps<{
   items: RepairStep[];
   /** 是否展示上下移动/拖拽排序 */
   sortable?: boolean;
+  /** 只读：正式档案快照下隐藏完成/回退/排序操作 */
+  readonly?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -73,31 +75,34 @@ function onDrop(toId: string) {
       </el-table-column>
       <el-table-column label="操作" width="250">
         <template #default="{ row, $index }">
-          <el-button v-if="row.state !== 'done'" size="small" type="primary" @click="emit('finish', row.id)">
-            完成
-          </el-button>
-          <el-button v-else size="small" type="warning" @click="emit('rollback', row.id)">回退</el-button>
-          <template v-if="sortable">
-            <el-button size="small" :disabled="$index === 0" @click="emit('move', { id: row.id, direction: 'up' })">
-              上移
+          <template v-if="!readonly">
+            <el-button v-if="row.state !== 'done'" size="small" type="primary" @click="emit('finish', row.id)">
+              完成
             </el-button>
-            <el-button
-              size="small"
-              :disabled="$index === items.length - 1"
-              @click="emit('move', { id: row.id, direction: 'down' })"
+            <el-button v-else size="small" type="warning" @click="emit('rollback', row.id)">回退</el-button>
+            <template v-if="sortable">
+              <el-button size="small" :disabled="$index === 0" @click="emit('move', { id: row.id, direction: 'up' })">
+                上移
+              </el-button>
+              <el-button
+                size="small"
+                :disabled="$index === items.length - 1"
+                @click="emit('move', { id: row.id, direction: 'down' })"
+              >
+                下移
+              </el-button>
+            </template>
+            <span
+              class="drag-handle"
+              draggable="true"
+              title="拖拽到目标行可交换顺序"
+              @dragstart="onDragStart(row.id)"
+              @dragover.prevent
+              @drop="onDrop(row.id)"
+              >⣿</span
             >
-              下移
-            </el-button>
           </template>
-          <span
-            class="drag-handle"
-            draggable="true"
-            title="拖拽到目标行可交换顺序"
-            @dragstart="onDragStart(row.id)"
-            @dragover.prevent
-            @drop="onDrop(row.id)"
-            >⣿</span
-          >
+          <el-tag v-else size="small" type="info" effect="plain">封存只读</el-tag>
         </template>
       </el-table-column>
     </el-table>

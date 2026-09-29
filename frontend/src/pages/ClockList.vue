@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { useClockStore } from '../stores/clockStore';
 import { useStepStore } from '../stores/stepStore';
+import { useArchiveStore } from '../stores/archiveStore';
 import { useClockSearch } from '../hooks/useClockSearch';
 import ClockCard from '../components/common/ClockCard.vue';
 import { CLOCK_KINDS, CONDITION_GRADES, type ClockDraft, type ClockKind, type ConditionGrade } from '../types/clock';
@@ -11,6 +12,7 @@ import { CLOCK_KINDS, CONDITION_GRADES, type ClockDraft, type ClockKind, type Co
 const router = useRouter();
 const clockStore = useClockStore();
 const stepStore = useStepStore();
+const archiveStore = useArchiveStore();
 const { filters, result, options, reset } = useClockSearch();
 
 const REPAIR_STATES = ['未开工', '维修中', '待测试', '已完成'] as const;
@@ -35,6 +37,15 @@ const columns = computed(() =>
     rows: result.value.filter((it) => repairStateOf(it.id) === state),
   })),
 );
+
+/** 档案角标：返修中优先，其次正式封存版 */
+function archiveBadgeOf(clockId: string): { tag: string; type: 'danger' | 'success' } | undefined {
+  const repair = archiveStore.repairByClock(clockId);
+  if (repair) return { tag: `返修中 ${repair.no}`, type: 'danger' };
+  const sealed = archiveStore.sealedByClock(clockId);
+  if (sealed) return { tag: `正式档案 v${sealed.version}`, type: 'success' };
+  return undefined;
+}
 
 const dialogVisible = ref(false);
 const form = reactive<ClockDraft>({
@@ -79,6 +90,7 @@ async function submit() {
 onMounted(() => {
   void clockStore.load();
   void stepStore.load();
+  void archiveStore.load();
 });
 </script>
 
@@ -146,6 +158,8 @@ onMounted(() => {
           :footer="`工序 ${stepStore.items.filter((s) => s.clockId === item.id && s.state === 'done').length}/${
             stepStore.items.filter((s) => s.clockId === item.id).length
           } · 走时测试 ${stepStore.tests.filter((t) => t.clockId === item.id).length} 次`"
+          :archive-tag="archiveBadgeOf(item.id)?.tag"
+          :archive-tag-type="archiveBadgeOf(item.id)?.type"
           @open="(id) => router.push(`/clocks/${id}`)"
         />
         <el-empty v-if="col.rows.length === 0" description="暂无" :image-size="60" />

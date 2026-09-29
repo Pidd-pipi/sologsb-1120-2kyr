@@ -3,10 +3,12 @@ import type { Clock } from '../types/clock';
 import type { MovementPart } from '../types/part';
 import type { RepairStep } from '../types/step';
 import type { TimekeepingTest } from '../types/test';
+import type { ArchiveVersion, HistoryEntry, RepairOrder } from '../types/archive';
+import { isSealable, isPassingTest } from './archive';
 import { newId } from './id';
 
 export const DB_NAME = 'gbclockrepair';
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const LS_VERSION_KEY = 'gbclockrepair:db-version';
 
 class ClockRepairDB extends Dexie {
@@ -14,6 +16,9 @@ class ClockRepairDB extends Dexie {
   parts!: Table<MovementPart, string>;
   steps!: Table<RepairStep, string>;
   tests!: Table<TimekeepingTest, string>;
+  history!: Table<HistoryEntry, string>;
+  archives!: Table<ArchiveVersion, string>;
+  repairs!: Table<RepairOrder, string>;
 
   constructor() {
     super(DB_NAME);
@@ -47,6 +52,73 @@ class ClockRepairDB extends Dexie {
           .modify((row: any) => {
             if (row.positions === undefined) row.positions = [];
           });
+      });
+    // v3：维修沿革（只增不改）、正式档案版本、返修单
+    this.version(3)
+      .stores({
+        clocks: 'id, clockNo, kind, caliber, conditionGrade, createdAt',
+        parts: 'id, clockId, name, wearState, decision, sourceLot',
+        steps: 'id, clockId, seq, stepType, state, startedAt',
+        tests: 'id, clockId, testedAt, conclusion',
+        history: 'id, clockId, category, at, repairOrderId',
+        archives: 'id, clockId, version, status, sealedAt',
+        repairs: 'id, clockId, no, status, openedAt',
+      })
+      .upgrade(async (tx) => {
+        // 旧数据首次打开：每台钟表补成第 1 版基线；已满足封存资格的直接封存为正式 v1
+        const clocks = (await tx.table('clocks').toArray()) as Clock[];
+        const partsAll = (await tx.table('parts').toArray()) as MovementPart[];
+        const stepsAll = (await tx.table('steps').toArray()) as RepairStep[];
+        const testsAll = (await tx.table('tests').toArray()) as TimekeepingTest[];
+        const now = Date.now();
+        const archivedEntries: HistoryEntry[] = [];
+
+        for (const clock of clocks) {
+          const parts = partsAll.filter((p) => p.clockId === clock.id);
+          const steps = stepsAll.filter((s) => s.clockId === clock.id).sort((a, b) => a.seq - b.seq);
+          const tests = testsAll.filter((t) => t.clockId === clock.id).sort((a, b) => b.testedAt - a.testedAt);
+          const qualified = isSealable({ clock, parts, steps, tests });
+
+          const version: ArchiveVersion = {
+            id: newId('arc'),
+            clockId: clock.id,
+            version: 1,
+            status: qualified ? 'sealed' : 'baseline',
+            source: 'backfill',
+            sealedAt: qualified ? now : 0,
+            sealedBy: qualified ? '系统迁移' : '',
+            clock,
+            parts,
+            steps,
+            tests,
+            note: qualified ? '旧档补录：工序全部完成且已有合格测试，自动封存为第 1 版正式档案' : '旧档首次打开补录的第 1 版基线，满足条件后封存',
+            createdAt: now,
+          };
+          await tx.table('archives').put(version);
+
+          archivedEntries.push({
+            id: newId('hst'),
+            clockId: clock.id,
+            category: 'archive',
+            action: '旧档补录为第 1 版',
+            operator: '系统迁移',
+            at: now,
+            refs: [
+              { type: 'clock', id: clock.id, label: clock.clockNo },
+              { type: 'archive', id: version.id, label: 'v1' },
+            ],
+            changes: [
+              { field: '版本', after: 'v1' },
+              { field: '档案状态', after: qualified ? '已封存（正式档案）' : '待封存基线' },
+              { field: '工序数', after: steps.length },
+              { field: '合格测试次数', after: tests.filter(isPassingTest).length },
+            ],
+            note: version.note,
+          });
+        }
+        if (archivedEntries.length > 0) {
+          await tx.table('history').bulkPut(archivedEntries);
+        }
       });
   }
 }
@@ -231,7 +303,7 @@ export async function ensureSeedData(): Promise<void> {
     },
   ];
 
-  await db.transaction('rw', db.clocks, db.parts, db.steps, db.tests, async () => {
+  await db.transaction('rw', [db.clocks, db.parts, db.steps, db.tests, db.history, db.archives, db.repairs], async () => {
     await db.clocks.bulkPut(clocks);
     await db.parts.bulkPut(parts);
     await db.steps.bulkPut(steps);
